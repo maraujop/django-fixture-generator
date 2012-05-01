@@ -29,4 +29,8 @@ Requires Django 1.2.
         Group.objects.create(name="Wizards")
  
  * Run ``manage.py generate_fixture my_app.test_users``.
- * Save the resulting fixture somewhere.
+ * Save the resulting fixture somewhere. 
+ * Note that you can't create an initial_data.json (or any other format)
+   directly.  If you want to redirect the generate_fixture output to a file,
+   try ``python manage.py generate_fixture my_app.test_users > initial_data.txt``
+   and then rename it after it's generated.

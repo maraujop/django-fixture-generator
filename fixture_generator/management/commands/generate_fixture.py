@@ -1,9 +1,11 @@
 import os
 from optparse import make_option
 
-from django.core.management import BaseCommand, call_command
+from django.core.management import BaseCommand, call_command, CommandError
+from django.core.management.commands.dumpdata import Command as DumpDataCommand
 from django.conf import settings
 from django.db import router, connections
+from django.test.simple import DjangoTestSuiteRunner
 from django.utils.importlib import import_module
 from django.utils.module_loading import module_has_submodule
 
@@ -43,16 +45,16 @@ def linearize_requirements(available_fixtures, fixture, seen=None):
 class FixtureRouter(object):
     def __init__(self, models):
         self.models = models
-    
+
     def db_for_read(self, model, instance=None, **hints):
         return FIXTURE_DATABASE
-    
+
     def db_for_write(self, model, instance=None, **hints):
         return FIXTURE_DATABASE
-    
+
     def allow_relation(self, *args, **kwargs):
         return True
-    
+
     def allow_syncdb(self, db, model):
         return True
 
@@ -63,11 +65,16 @@ class Command(BaseCommand):
             help="Specifies the output serialization format for fixtures."),
         make_option("--indent", default=None, dest="indent", type="int",
             help="Specifies the indent level to use when pretty-printing output"),
-        make_option("--default", action='store_true', default=False, dest="default_settings", 
+        make_option("--default", action='store_true', default=False, dest="default_settings",
             help="Use default settings for generating test database"),
     )
+
+    option_list = tuple(
+        opt for opt in DumpDataCommand.option_list
+        if "--database" not in opt._long_opts and "--exclude" not in opt._long_opts
+    )
     args = "app_label.fixture"
-    
+
     def handle(self, fixture, **options):
         default_settings = options.get('default_settings')
 
@@ -83,37 +90,46 @@ class Command(BaseCommand):
                 if getattr(obj, "__fixture_gen__", False):
                     available_fixtures[(app.rsplit(".", 1)[-1], obj.__name__)] = obj
         app_label, fixture_name = fixture.rsplit(".", 1)
-        fixture = available_fixtures[(app_label, fixture_name)]
-        
+        try:
+            fixture = available_fixtures[(app_label, fixture_name)]
+        except KeyError:
+            available = ", ".join(
+                "%s.%s" % (app_label, fixture_name)
+                for app_label, fixture_name in available_fixtures
+            )
+            raise CommandError("Fixture generator '%s' not found, available "
+                "choices: %s" % (fixture, available))
+
         requirements, models = linearize_requirements(available_fixtures, fixture)
-       
+
         if not default_settings:
             settings.DATABASES[FIXTURE_DATABASE] = {
-                "ENGINE": "sqlite3",
-                "NAME": "fixture_gen.db",
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": ":memory:",
             }
             old_routers = router.routers
             router.routers = [FixtureRouter(models)]
- 
+
         # Creates tests databases for populating them with the fixtures
         elif default_settings:
-            from django.test.simple import DjangoTestSuiteRunner
             self.test_runner = DjangoTestSuiteRunner(verbosity=0)
             self.old_config = self.test_runner.setup_databases()
-            
+
         try:
             # migrate_all=True is for south, Django just absorbs it
-            # create_test_db already executes syncdb 
+            # create_test_db already executes syncdb
             if not default_settings:
                 call_command("syncdb", database=FIXTURE_DATABASE, verbosity=0,
                     interactive=False, migrate_all=True)
             for fixture_func in requirements:
                 fixture_func()
+
             if not default_settings:
                 call_command("dumpdata",
                     *["%s.%s" % (m._meta.app_label, m._meta.object_name) for m in models],
                     **dict(options, verbosity=0, database=FIXTURE_DATABASE)
                 )
+
             else:
                 for alias in connections._connections:
                     call_command("dumpdata",
@@ -122,10 +138,12 @@ class Command(BaseCommand):
                     )
         finally:
             if not default_settings:
-                os.remove("fixture_gen.db")
                 del settings.DATABASES[FIXTURE_DATABASE]
-                del connections._connections[FIXTURE_DATABASE]
+                if isinstance(connections._connections, dict):
+                    del connections._connections[FIXTURE_DATABASE]
+                else:
+                    delattr(connections._connections, FIXTURE_DATABASE)
+
                 router.routers = old_routers
             elif default_settings:
                 self.test_runner.teardown_databases(self.old_config)
-

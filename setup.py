@@ -29,6 +29,4 @@ setup(
         'Framework :: Django',
     ],
     test_suite='runtests.runtests',
-    zip_safe=False,
 )
-
